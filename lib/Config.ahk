@@ -1,5 +1,4 @@
-#Requires AutoHotkey v2.0.18+
-#Include ..\Prompts.ahk
+﻿#Requires AutoHotkey v2.0.18+
 #Include Dark_MsgBox.ahk ; Enables dark mode MsgBox and InputBox. Remove this if you want light mode MsgBox and InputBox
 #Include Dark_Menu.ahk ; Enables dark mode Menu. Remove this if you want light mode Menu
 #Include SystemThemeAwareToolTip.ahk ; Enables dark mode tooltips. Remove this if you want light mode tooltips
@@ -8,6 +7,12 @@
 #Include AutoXYWH.ahk ; Enables auto-resizing of GUI controls. Does not include resizing of Response Window GUI elements, as it is handled by HTML and CSS
 #Include ToolTipEx.ahk ; Enables the tooltip to track the mouse cursor smoothly and permit the tooltip to be moved by dragging
 DetectHiddenWindows true ; Enables detection of hidden windows for inter-process communication
+
+; ----------------------------------------------------
+; Globals
+; ----------------------------------------------------
+
+_oldClipboard := ""
 
 ; ----------------------------------------------------
 ; OpenRouter
@@ -37,11 +42,49 @@ class OpenRouter {
             role: "user",
             content: userPrompt
         }]
+        ; TODO: add other API parameters
+        ; requestObj.max_tokens := 4000
+        ; requestObj.temperature := 0.8
         return jsongo.Stringify(requestObj)
     }
 
     extractJSONResponse(var) {
         response := var.Get("choices")[1].Get("message").Get("content")
+        
+        ; TODO: make a clean () function including the following cleaning process.
+
+        ; remove carriage returns
+        response := StrReplace(response, "`r", "")          
+        
+        ; Remove leading newlines
+        while SubStr(response, 1, 1) == '`n' {
+            response := SubStr(response, 2)            
+        }
+        
+        ; Remove leading and trailing newlines and spaces
+        response := Trim(response)
+
+        ; Recursively remove enclosing double quotes
+        while (SubStr(response, 1, 1) == '"' && SubStr(response, -1) == '"') {
+            response := SubStr(response, 2, -1)
+            response := Trim(response)
+        }
+
+        ; Recursively remove enclosing single quotes
+        while (SubStr(response, 1, 1) == "'" && SubStr(response, -1) == "'") {
+            response := SubStr(response, 2, -1)
+            response := Trim(response)
+        }
+
+        ; Recursively remove code block backticks
+        while (SubStr(response, 1, 1) == "``" && SubStr(response, -1) == "``") {
+            response := SubStr(response, 2, -1)
+            response := Trim(response)
+        }
+
+        ; Change to Windows newline character
+        response := StrReplace(response, "`n", "`r`n")
+
         model := var.Get("model")
         return {
             response: response,
@@ -202,4 +245,105 @@ class CustomMessages {
                 PostMessage(state, uniqueID, 0, , "ahk_id " mainScriptHiddenhWnd)
         }
     }
+}
+
+; ----------------------------------------------------
+; Helper functions
+; ----------------------------------------------------
+
+RestoreClipboard() {
+    global _oldClipboard
+    A_Clipboard := _oldClipboard
+    _oldClipboard := ""
+}
+
+BackupClipboard() {
+    global _oldClipboard
+    ; Backup clipboard only if it's not already backed up
+    if _oldClipboard == "" {
+        _oldClipboard := A_Clipboard
+    }
+}
+
+GetSelectedTextFromControl() {
+    focusedControl := ControlGetFocus("A")  ; Get the ClassNN of the focused control
+    if !focusedControl
+        return ""  ; No control is focused, return empty string
+
+    hwnd := ControlGetHwnd(focusedControl, "A")  ; Get the HWND of the focused control
+
+    ; Send EM_GETSEL message to get the selection range
+    result := DllCall("User32.dll\SendMessageW", "Ptr", hwnd, "UInt", 0xB0, "Ptr", 0, "Ptr", 0, "UInt")
+
+    selStart := result & 0xFFFF  ; Lower 16 bits contain the start index
+    selEnd := result >> 16       ; Upper 16 bits contain the end index
+
+    ; Retrieve the full text of the control
+    controlText := ControlGetText(hwnd, "A")
+
+    return SubStr(controlText, selStart + 1, selEnd - selStart)
+}
+
+GetSelectedText() {    
+    ; Initialize text variable
+    text := ""
+
+    ; 1. Try copying text using Ctrl+C
+    BackupClipboard()
+    A_Clipboard := ""
+    Send("^c")
+    ClipWait(1)
+    text := A_Clipboard    
+    RestoreClipboard()
+
+    ; 2. If clipboard is empty, try getting selected text from the focused control
+    if StrLen(text) < 1
+        text := GetSelectedTextFromControl()
+
+    ; 3. If still empty, try getting all text from the focused control
+    if StrLen(text) < 1 {
+        focusedControl := ControlGetFocus("A")  ; Get focused control's identifier
+        if focusedControl
+            text := ControlGetText(focusedControl, "A")
+    }       
+    
+    ; De-identify PHI
+    ; TODO move De-Identify out of this function.
+    ;text := deIdentify(text)
+
+    return text
+}
+
+deIdentify(medical_history) {
+    ; 1. Names
+    medical_history := RegExReplace(medical_history, "[\x{4e00}-\x{9fa5}]{2,4}", "[DE-IDENTIFIED_CHINESE_NAME]") ; Chinese Names
+    ;medical_history := RegExReplace(medical_history, "\b[A-Z][a-z]+\s[A-Z][a-z]+\b", "[DE-IDENTIFIED_ENGLISH_NAME]") ; English Names (2 words)
+    ;medical_history := RegExReplace(medical_history, "\b[A-Z][a-z]+\s[A-Z][a-z]+\s[A-Z][a-z]+\b", "[DE-IDENTIFIED_ENGLISH_NAME]") ; English Names (3 words)
+
+    ; 2. National Identification Numbers (國民身分證字號)
+    medical_history := RegExReplace(medical_history, "\b[A-Z]{1}[12]\d{8}\b", "[DE-IDENTIFIED_NATIONAL_ID]")
+
+    ; 3. Resident Certificate Numbers (居留證號碼)
+    medical_history := RegExReplace(medical_history, "\b[A-Z]{2}\d{8}\b", "[DE-IDENTIFIED_RESIDENT_ID]")
+
+    ; 4. Birthdates (出生日期)
+    ;medical_history := RegExReplace(medical_history, "\b\d{4}[-/]\d{2}[-/]\d{2}\b", "[DE-IDENTIFIED_BIRTHDATE]") ; YYYY-MM-DD
+    ;medical_history := RegExReplace(medical_history, "\b\d{2}[-/]\d{2}[-/]\d{4}\b", "[DE-IDENTIFIED_BIRTHDATE]") ; MM-DD-YYYY
+    ;medical_history := RegExReplace(medical_history, "\b\d{2}[-/]\d{2}[-/]\d{2}\b", "[DE-IDENTIFIED_BIRTHDATE]") ; DD-MM-YY (Ambiguous, be careful)
+    ;medical_history := RegExReplace(medical_history, "\b(民國|西元)\s*\d{2,3}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日\b", "[DE-IDENTIFIED_BIRTHDATE]") ; Chinese format
+
+    ; 5. Phone Numbers (電話號碼)
+    medical_history := RegExReplace(medical_history, "(0\d{1,2}-\d{6,8})", "[DE-IDENTIFIED_PHONE]") ; Landlines
+    medical_history := RegExReplace(medical_history, "(09\d{2}-\d{3}-\d{3})", "[DE-IDENTIFIED_PHONE]") ; Mobile (with hyphens)
+    medical_history := RegExReplace(medical_history, "(09\d{8})", "[DE-IDENTIFIED_PHONE]") ; Mobile (no hyphens)
+
+    ; 6. Email Addresses (電子郵件地址)
+    medical_history := RegExReplace(medical_history, "\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", "[DE-IDENTIFIED_EMAIL]")
+
+    ; 7. Medical Record Numbers/Patient IDs (病歷號碼/病人ID) - Example patterns, adjust as needed!
+    medical_history := RegExReplace(medical_history, "\b\d{7}\b", "[DE-IDENTIFIED_MEDICAL_ID]") ; 7 digit number
+    medical_history := RegExReplace(medical_history, "\b[A-Za-z]\d{6,8}\b", "[DE-IDENTIFIED_MEDICAL_ID]") ; Letter followed by 6-8 digits
+    medical_history := RegExReplace(medical_history, "\b[A-Za-z]{2}\d{5,7}\b", "[DE-IDENTIFIED_MEDICAL_ID]") ; Two letters followed by 5-7 digits
+
+    return medical_history
 }

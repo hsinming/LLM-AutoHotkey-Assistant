@@ -1,4 +1,4 @@
-#Include Config.ahk
+﻿#Include Config.ahk
 #SingleInstance Off
 #NoTrayIcon
 
@@ -47,7 +47,7 @@ subScriptHotkeyActions(action) {
 }
 
 ; ----------------------------------------------------
-; Read data from main script and start loading cursor
+; Read data from responseWindowDataObj in main script and start loading cursor
 ; ----------------------------------------------------
 
 requestParams := jsongo.Parse(FileOpen(A_Args[1], "r", "UTF-8").Read())
@@ -63,7 +63,7 @@ TraySetIcon(FileExist(icon := "..\icons\" requestParams["providerName"] ".ico") 
 ; Create new instance of OpenRouter class
 ; ----------------------------------------------------
 
-router := OpenRouter(APIKey)
+router := OpenRouter(IniRead("..\settings.ini", "settings", "api_key"))
 
 ; ----------------------------------------------------
 ; Create Response Window
@@ -80,6 +80,7 @@ DllCall("Dwmapi\DwmSetWindowAttribute", "ptr", responseWindow.hWnd, "int", 20, "
 
 ; Assign actions to click events
 responseWindow.AddHostObjectToScript("ButtonClick", { func: buttonClickAction })
+
 buttonClickAction(action) {
     static chatHistoryButtonText := "Chat History"
 
@@ -266,7 +267,6 @@ chatHistoryJSONRequest := manageChatHistoryJSON("get")
 sendRequestToLLM(&chatHistoryJSONRequest, true)
 
 sendRequestToLLM(&chatHistoryJSONRequest, initialRequest := false) {
-
     ; Run the cURL command asynchronously and store the PID
     Run(FileOpen(requestParams["cURLCommandFile"], "r", "UTF-8").Read(), , "Hide", &cURLPID)
     manageState("cURL", "set", cURLPID)
@@ -310,15 +310,9 @@ sendRequestToLLM(&chatHistoryJSONRequest, initialRequest := false) {
         "-")
 
         manageState("model", "add", responseFromLLM.model)
-        router.appendToChatHistory("assistant",
-            responseFromLLM.response, &chatHistoryJSONRequest, requestParams["chatHistoryJSONRequestFile"])
+        router.appendToChatHistory("assistant", responseFromLLM.response, &chatHistoryJSONRequest, requestParams["chatHistoryJSONRequestFile"])
     } catch as e {
         JSONResponseFromLLM := router.extractErrorResponse(JSONResponseVar)
-        responseFromLLM :=
-            "**⛔ Error parsing response**`n`n" e.Message
-            . "`n`n---`n`n**⚠️ Response from the API**`n`n"
-            . JSONResponseFromLLM.error
-            . "`n`n---`n`n"
         errorCodes := {
             400: "You may have specified an invalid API model. See [this guide](https://github.com/kdalanon/LLM-AutoHotkey-Assistant/blob/main/README.md#apimodels) on how to get the correct API models.",
             401: "Authentication failed. Your API key or session might be invalid or expired. Check your keys [here](https://openrouter.ai/settings/keys), re-add it to the app, and try again.",
@@ -329,9 +323,13 @@ sendRequestToLLM(&chatHistoryJSONRequest, initialRequest := false) {
             502: "Service temporarily unavailable. The chosen model is either down or returned an invalid response. Please try again later or select a different model.",
             503: "No suitable model available. There are no providers currently meeting your request requirements. Please try again later or adjust your routing settings."
         }
-
-        responseFromLLM .= errorCodes.%JSONResponseFromLLM.code%
-        showResponseWindow(responseFromLLM, initialRequest)
+        errorMessage :=
+            "**⛔ Error parsing response**`n`n" e.Message
+            . "`n`n---`n`n**⚠️ Response from the API**`n`n"
+            . JSONResponseFromLLM.error
+            . "`n`n---`n`n"
+            . errorCodes.%JSONResponseFromLLM.code%
+        showResponseWindow(errorMessage, initialRequest)
         postWebMessage("responseWindowButtonsEnabled", true)
         startLoadingCursor(false)
         Exit
@@ -373,16 +371,26 @@ sendRequestToLLM(&chatHistoryJSONRequest, initialRequest := false) {
     manageState("chat", "add", { chatHistory: chatHistory, latestResponse: latestResponse })
 
     if requestParams["isAutoPaste"] {
-        A_Clipboard := responseFromLLM.response
+        if requestParams["replaceSelected"] {
+            output := requestParams["responseStart"] . responseFromLLM.response . requestParams["responseEnd"]
+        } else {            
+            output := requestParams["selectedText"] . requestParams["responseStart"] . responseFromLLM.response . requestParams["responseEnd"]
+        }       
+        
+        BackupClipboard()                
+        A_Clipboard := Trim(output, "`r`n")  ; Remove leading/trailing newlines
+        WinActivate(requestParams["activeWin"])
         Send("^v")
+        Sleep 500
+        RestoreClipboard()
+
         startLoadingCursor(false)
         CustomMessages.notifyResponseWindowState(CustomMessages.WM_RESPONSE_WINDOW_CLOSED, requestParams["uniqueID"],
             responseWindow.hWnd, requestParams["mainScriptHiddenhWnd"])
         deleteTempFiles()
         ExitApp
     } else {
-        showResponseWindow(responseFromLLM.response, initialRequest, !initialRequest && !(WinActive(responseWindow.hWnd
-        )))
+        showResponseWindow(responseFromLLM.response, initialRequest, !initialRequest && !(WinActive(responseWindow.hWnd)))
         postWebMessage("responseWindowButtonsEnabled", true)
         startLoadingCursor(false)
     }
